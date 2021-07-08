@@ -1,0 +1,260 @@
+---
+title: "CSC 235 Final Project: Data Cleanup"
+author: "Allie"
+date: "5/18/2021"
+output: 
+  html_document:
+    theme: united
+    highlight: tango
+    toc: yes
+    toc_float: yes
+---
+
+# Read in Data
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r packages}
+library(dplyr)      # run install.packages("package_name")
+library(stringr)    # in console to install missing packages
+library(stringi)
+```
+
+
+## Read in March data
+
+```{r}
+mar19 <- read.csv("original_data/original-2019-03-march.csv", 
+                  na.strings=c(""," ",NA))
+
+mar20 <- read.csv("original_data/original-2020-03-march.csv", 
+                  na.strings=c(""," ",NA))
+```
+
+
+## Read in April data
+
+```{r}
+apr19 <- read.csv("original_data/original-2019-04-april.csv", 
+                  na.strings=c(""," ",NA))
+
+apr20 <- read.csv("original_data/original-2020-04-april.csv", 
+                  na.strings=c(""," ",NA))
+```
+
+
+# Delete Unnecessary Columns and Filter by 3 Major New York Airports
+
+```{r}
+# dataframes to include
+data_frames <- c("mar19", "mar20", "apr19", "apr20")
+# airports to filter by
+nyAirports <- c("EWR", "JFK", "LGA")
+
+# columns to delete
+colsDel <- c("X", "DUP", "ORIGIN_CITY_NAME", "ORIGIN_STATE_ABR",
+             "ORIGIN_STATE_NM", "DEST_CITY_NAME", "DEST_STATE_ABR",
+             "DEST_STATE_NM", "DEP_DELAY_NEW", "TAXI_OUT", "WHEELS_OFF",
+             "WHEELS_ON", "TAXI_IN", "ARR_DELAY_NEW", "CRS_ELAPSED_TIME",
+             "ACTUAL_ELAPSED_TIME", "AIR_TIME", "DISTANCE", "FIRST_DEP_TIME",
+             "TOTAL_ADD_GTIME", "DIV_ACTUAL_ELAPSED_TIME", "BRANDED_CODE_SHARE",
+             "TAIL_NUM", "OP_CARRIER_FL_NUM", "CANCELLATION_CODE", 
+             "DIV_AIRPORT_LANDINGS", "DIV_DISTANCE", "DEP_TIME", "ARR_TIME")
+```
+
+```{r}
+colsStr <- paste0("-", str_c(colsDel, collapse=", -"))
+
+for(fr in data_frames) {
+  eval(parse(text=paste0(fr," <- select(",fr, ", c(",colsStr,"))")))
+  eval(parse(text=paste0(fr," <- ",fr,
+                         " %>% filter(DEST %in% nyAirports | ORIGIN %in% nyAirports)")))
+}
+```
+
+
+# Combine dataframes
+
+```{r}
+flNY <- rbind(mar19, mar20, apr19, apr20)
+```
+
+
+# Format Existing Columns
+
+## Rename columns
+
+```{r}
+names(flNY) <- str_to_lower(names(flNY))
+```
+
+```{r}
+flNY <- flNY %>%
+  rename(weekday = day_of_week,
+         date = fl_date,
+         network_airline = mkt_unique_carrier,
+         operating_airline = op_unique_carrier)
+```
+
+## Format time columns
+
+```{r}
+time_cols <- c("crs_dep_time", "crs_arr_time")
+
+formatTime <- function(time_col) {
+  x <- as.character(time_col)
+  x <- str_pad(x, 4, side="lef", pad="0")
+  stri_sub(x, 3, 2) <- ":"
+  return(x)
+}
+
+for(col in time_cols) {
+  eval(parse(text=paste0("flNY$",col," <- formatTime(flNY$",col,")")))
+}
+```
+
+## Format `cancelled`, `diverted`, and `div_reached_dest` columns
+
+```{r}
+flNY$cancelled <- as.logical(flNY$cancelled)
+flNY$diverted <- as.logical(flNY$diverted)
+flNY$div_reached_dest <- as.logical(flNY$div_reached_dest)
+```
+
+
+# Create New Columns
+
+## `month.name` column
+
+```{r}
+lookup_days <- read.csv("original_data/lookup_tables/L_MONTHS.csv_")
+getMonth <- lookup_days$Description
+names(getMonth) <- lookup_days$Code
+
+flNY$month.name <- getMonth[flNY$month]
+```
+
+
+## `weekday.name` columns
+
+```{r}
+lookup_days <- read.csv("original_data/lookup_tables/L_WEEKDAYS.csv_")
+getWeekday <- lookup_days$Description
+names(getWeekday) <- lookup_days$Code
+
+flNY$weekday.name <- getWeekday[flNY$weekday]
+```
+
+
+## `origin.name` and `dest.name` columns
+
+```{r}
+lookup_airport <- read.csv("original_data/lookup_tables/L_AIRPORT.csv_")
+getAirport <- str_split_fixed(lookup_airport$Description, ": ", 2)[,2]
+names(getAirport) <- lookup_airport$Code
+
+flNY$origin.name <- getAirport[flNY$origin]
+flNY$dest.name <- getAirport[flNY$dest]
+```
+
+## `network_airline.name` and `operating_airline.name` columns
+
+```{r}
+lookup_carrier <- read.csv("original_data/lookup_tables/L_UNIQUE_CARRIERS.csv_")
+getAirline <- lookup_carrier$Description
+names(getAirline) <- lookup_carrier$Code
+
+flNY$network_airline.name <- getAirline[flNY$network_airline]
+flNY$operating_airline.name <- getAirline[flNY$operating_airline]
+```
+
+
+## `dep_delay.c` and `arr_delay.c` columns
+
+```{r}
+Fdep_delay.c <- function(row) {
+  if(flNY$cancelled[row] == TRUE) {
+    return(NA)
+  } else { # not cancelled
+    return(flNY$dep_delay[row])
+  }
+}
+
+Farr_delay.c <- function(row) {
+  if(flNY$cancelled[row] == TRUE) {
+    return(NA)
+  } else if(flNY$diverted[row] == TRUE) {
+    if(flNY$div_reached_dest[row] == FALSE) {
+      return(NA)
+    } else { # flNY$div_reached_dest[row] == TRUE
+      return(flNY$div_arr_delay[row])
+    }
+  } else { # not diverted or cancelled
+    return(flNY$arr_delay[row])
+  }
+}
+
+flNY$dep_delay.c <- sapply(1:nrow(flNY), Fdep_delay.c)
+flNY$arr_delay.c <- sapply(1:nrow(flNY), Farr_delay.c)
+```
+
+
+## `dep_delay.info` and `arr_delay.info` columns
+
+```{r}
+delayCat <- c("Early", "On Time", "Delay 0:15 to 0:29", "Delay 0:30 to 0:44",
+              "Delay 0:45 to 0:59", "Delay 1:00 to 1:14", "Delay 1:14 to 1:29", 
+              "Delay 1:30 to 1:44", "Delay 1:45 to 1:59", "Delay 2:00 to 2:14",
+              "Delay 2:15 to 2:29", "Delay 2:30 to 2:44", "Delay 2:45 to 2:59",
+              "Delay 3:00 and above", "Cancelled or Diverted")
+
+Fdelay.info <- function(delay) {
+  if(is.na(delay)) {
+    return(delayCat[15])
+  } else if(delay < 0) {
+    return(delayCat[1])
+  } else if(delay < 15) {
+    return(delayCat[2])
+  } else if(delay < 30) {
+    return(delayCat[3])
+  } else if(delay < 45) {
+    return(delayCat[4])
+  } else if(delay < 60) {
+    return(delayCat[5])
+  } else if(delay < 75) {
+    return(delayCat[6])
+  } else if(delay < 90) {
+    return(delayCat[7])
+  } else if(delay < 105) {
+    return(delayCat[8])
+  } else if(delay < 120) {
+    return(delayCat[9])
+  } else if(delay < 135) {
+    return(delayCat[10])
+  } else if(delay < 150) {
+    return(delayCat[11])
+  } else if(delay < 165) {
+    return(delayCat[12])
+  } else if(delay < 180) {
+    return(delayCat[13])
+  } else { #delay >= 180
+    return(delayCat[14])
+  }
+}
+
+flNY$dep_delay.info <- sapply(flNY$dep_delay.c, Fdelay.info)
+flNY$arr_delay.info <- sapply(flNY$arr_delay.c, Fdelay.info)
+```
+
+
+# Write final dataframe to .csv file
+
+```{r}
+write.csv(flNY, "flight_delay_shiny_app/files/NY-flights.csv", row.names=FALSE)
+```
+
+
+
+
